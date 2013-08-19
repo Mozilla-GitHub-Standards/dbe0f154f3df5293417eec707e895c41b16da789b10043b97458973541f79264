@@ -10,7 +10,7 @@ A repoze.who plugin for Hawk HTTP Access Authentication:
 """
 
 __ver_major__ = 0
-__ver_minor__ = 1
+__ver_minor__ = 2
 __ver_patch__ = 0
 __ver_sub__ = ""
 __ver_tuple__ = (__ver_major__, __ver_minor__, __ver_patch__, __ver_sub__)
@@ -42,23 +42,38 @@ class HawkAuthPlugin(object):
 
     The plugin can be customized with the following arguments:
 
-        * decode_hawk_id:  a callable taking a Request object and Hawk id, and
-                           returning the Hawk secret key and user data dict.
+        * master_secret:  a secret known only by the server, used for signing
+                          Hawk id tokens in the default implementation.
 
         * nonce_cache:  an object implementing the same interface as
                         hawkauthlib.NonceCache.
+
+        * decode_hawk_id:  a callable taking a Request object and Hawk id, and
+                           returning the Hawk secret key and user data dict.
+
+        * encode_hawk_id:  a callable taking a Request object and userid, and
+                           returning the Hawk token id and secret key.
 
     """
 
     implements(IIdentifier, IChallenger, IAuthenticator)
 
-    def __init__(self, decode_hawk_id=None, nonce_cache=None):
-        if decode_hawk_id is not None:
-            self.decode_hawk_id = decode_hawk_id
+    # The default value of master_secret is None, which will cause tokenlib
+    # to generate a fresh secret at application startup.
+    master_secret = None
+
+    def __init__(self, master_secret=None, nonce_cache=None,
+                 decode_hawk_id=None, encode_hawk_id=None):
+        if master_secret is not None:
+            self.master_secret = master_secret
         if nonce_cache is not None:
             self.nonce_cache = nonce_cache
         else:
             self.nonce_cache = hawkauthlib.NonceCache()
+        if decode_hawk_id is not None:
+            self.decode_hawk_id = decode_hawk_id
+        if encode_hawk_id is not None:
+            self.encode_hawk_id = encode_hawk_id
 
     def identify(self, environ):
         """Extract the authentication info from the request.
@@ -167,9 +182,25 @@ class HawkAuthPlugin(object):
 
         If the Hawk id is invalid then ValueError will be raised.
         """
-        secret = tokenlib.get_token_secret(id)
-        data = tokenlib.parse_token(id)
+        secret = tokenlib.get_token_secret(id, secret=self.master_secret)
+        data = tokenlib.parse_token(id, secret=self.master_secret)
         return secret, data
+
+    def encode_hawk_id(self, request, data):
+        """Encode data dict into Hawk id token and secret key.
+
+        This method is essentially the reverse of decode_hawk_id.  Given a
+        dict of identity data, it encodes it into a unique Hawk id token and
+        corresponding secret key.  By default it uses the tokenlib library,
+        but plugin instances may override this method with another callable
+        the config file.
+
+        This method is not needed when consuming auth tokens, but is very
+        handy when building them for testing purposes.
+        """
+        id = tokenlib.make_token(data, secret=self.master_secret)
+        secret = tokenlib.get_token_secret(id, secret=self.master_secret)
+        return id, secret
 
     def _check_signature(self, request, secret, params=None):
         """Check the request signature, using our local nonce cache."""
@@ -194,11 +225,14 @@ def make_plugin(**kwds):
     repoze.who .ini config file system.  It converts its arguments from
     strings to the appropriate type then passes them on to the plugin.
     """
-    decode_hawk_id = _load_function_from_kwds("decode_hawk_id", kwds)
+    master_secret = kwds.pop("master_secret", None)
     nonce_cache = _load_object_from_kwds("nonce_cache", kwds)
+    decode_hawk_id = _load_function_from_kwds("decode_hawk_id", kwds)
+    encode_hawk_id = _load_function_from_kwds("encode_hawk_id", kwds)
     for unknown_kwd in kwds:
         raise TypeError("unknown keyword argument: %s" % unknown_kwd)
-    plugin = HawkAuthPlugin(decode_hawk_id, nonce_cache)
+    plugin = HawkAuthPlugin(master_secret, nonce_cache,
+                            decode_hawk_id, encode_hawk_id)
     return plugin
 
 

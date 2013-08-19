@@ -14,7 +14,6 @@ from repoze.who.interfaces import IIdentifier, IAuthenticator, IChallenger
 from repoze.who.middleware import PluggableAuthenticationMiddleware
 
 import hawkauthlib
-import tokenlib
 
 from repoze.who.plugins.hawkauth import HawkAuthPlugin, make_plugin
 
@@ -80,6 +79,11 @@ def stub_decode_hawk_id(request, id, **extra):
     return id, data
 
 
+def stub_encode_hawk_id(request, data):
+    """Stub hawk-id-encoding function that just reads the id from the data."""
+    return data["userid"]
+
+
 class TestHawkAuthPlugin(unittest.TestCase):
     """Testcases for the main HawkAuthPlugin class."""
 
@@ -95,8 +99,7 @@ class TestHawkAuthPlugin(unittest.TestCase):
         self.app = TestApp(application)
 
     def _get_credentials(self, **data):
-        id = tokenlib.make_token(data)
-        key = tokenlib.get_token_secret(id)
+        id, key = self.plugin.encode_hawk_id(Request.blank("/"), data)
         return {"id": id, "key": key}
 
     def test_implements(self):
@@ -106,10 +109,14 @@ class TestHawkAuthPlugin(unittest.TestCase):
 
     def test_make_plugin_can_explicitly_set_all_properties(self):
         plugin = make_plugin(
+            master_secret="elvislives",
+            nonce_cache="hawkauthlib:NonceCache",
             decode_hawk_id=dotted_name("stub_decode_hawk_id"),
-            nonce_cache="hawkauthlib:NonceCache")
-        self.assertEquals(plugin.decode_hawk_id, stub_decode_hawk_id)
+            encode_hawk_id=dotted_name("stub_encode_hawk_id"))
+        self.assertEquals(plugin.master_secret, "elvislives")
         self.assertTrue(isinstance(plugin.nonce_cache, hawkauthlib.NonceCache))
+        self.assertEquals(plugin.decode_hawk_id, stub_decode_hawk_id)
+        self.assertEquals(plugin.encode_hawk_id, stub_encode_hawk_id)
 
     def test_make_plugin_passes_on_args_to_nonce_cache(self):
         plugin = make_plugin(
@@ -286,3 +293,14 @@ class TestHawkAuthPlugin(unittest.TestCase):
     def test_authenticate_only_accepts_hawk_credentials(self):
         # Yes, this is a rather pointless test that boosts line coverage...
         self.assertEquals(self.plugin.authenticate(make_environ(), {}), None)
+
+    def test_authentication_with_custom_master_secret(self):
+        self.plugin.master_secret = "elvislives"
+        try:
+            creds = self._get_credentials(username="test@moz.com")
+            req = Request.blank("/")
+            hawkauthlib.sign_request(req, **creds)
+            r = self.app.request(req)
+            self.assertEquals(r.body, "test@moz.com")
+        finally:
+            self.plugin.master_secret = None
